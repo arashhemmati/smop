@@ -1,0 +1,766 @@
+% Coor stores coordinates of nodes
+% coordinates of joint n is located at row n
+Coor=load('Cor.txt');
+%------------------------------------------------------------------
+% Elem stores connectivity of elements
+% connectivity and section number of element n is located at row n
+% col-1 start joint
+% col-2 end joint
+% col-3 section number
+Elem=load('Elem.txt');
+%------------------------------------------------------------------
+% Sec stores section properties
+% data of section n is located at row n 
+%col-1 : inner radi
+%col-2 : outter radi
+%col-3 : modul of elasticity
+%col-4 : poisson ratio
+%col-5 : densityv
+Sec=load('Sec.txt');
+%-------------------------------------------------------------------
+% Bnd stores supports data
+% col-1 : node number
+% col-2 : local dof restreined for example use 1 for restreined uX 
+%         (1 for uX, 2 for uY , 3 for uZ , 4 for thX, 5 for thY, 6 for thZ)
+Bnd=[1 3
+     1 4
+     1 5
+     1 6];
+  %--------------------------gravity----------------------------------------------
+  gravity=9.81;   
+ %---------------------Rayleigh damping-----------------------------------------
+ %Dmp stores Rayleigh damping data , Rayleigh damping coeffiecients are calculted by program
+ %col-1 frequency number
+ %col-2 damping ratio
+ Dmp=[1  0.0000000000;
+        5 0.000000000];
+%------------------------Load------------------------------------------------------------------------------  
+%Load stores loading data for nodal forces
+Load{1,1}=[112    1];
+Load{2,1}=[112    2];
+Load{3,1}=[112    3];
+Load{4,1}=[112    4];
+Load{5,1}=[112  5];
+Load{6,1}=[112  6];
+
+AmWind=load('WhiteNoise.txt');
+
+AwWind1=AmWind(:,1);
+AwWind2=1000*AmWind(:,2);
+AwWind3=1000*AmWind(:,3);
+AwWind4=1000*AmWind(:,4);
+AwWind5=1000*AmWind(:,5);
+AwWind6=1000*AmWind(:,6);
+AwWind7=1000*AmWind(:,7);
+
+Load{1,2}=[AwWind1,AwWind2];
+Load{2,2}=[AwWind1,AwWind3];
+Load{3,2}=[AwWind1,AwWind4];
+Load{4,2}=[AwWind1,AwWind5];
+Load{5,2}=[AwWind1,AwWind6];
+Load{6,2}=[AwWind1,AwWind7];
+
+%----------groundAccl---------------------------------------------------
+% groundAccel{n,1} driection of ground accelaration of n-th ground motion  
+%groundAccel {n,2} time history of ground acceleration col-1->time %col2->acceleration ratio to gravity
+Amp=load('XX1.txt');
+
+groundAccel{1,1}=1;
+groundAccel{1,2}=Amp;             
+groundAccel{1,2}(:,2)=9.81*0.0000000001*groundAccel{1,2}(:,2);
+ %------------------------TMD----------------------------------------------------%
+
+% TMD matrices stores:
+% col-1 node that TMD attached
+% col-2 direction
+% col-3 TMD mass
+% col-4 TMD stiffness 
+% col-5 Damping
+% col-6 absloute of gap distance;
+
+%TMD=[145 1 20000 41657  10000 10];
+%TMD=[145 1 1 1  1 10];
+TMD=[];
+%-------------TCLD------------------------------------------------------------%
+% TCLD matrices stores:
+% col-1 node that TCLD attached
+% col-2 direction
+% col-3 TCLD density
+% col-4 A 
+% col-5 B
+% col-6 L
+% col-7 xi
+%TCLD=[14 1  1000 2.0819 7.6854 9.6067 4.6886];
+TCLD=[];
+%-------------------------------------------   
+%Foundation matrices stores:
+% col-1 foundation start node
+% col-2 foundation end node
+% col-3 H parameter for start dof
+% col-4 H parameter for end dof
+% col-5 A parameter
+% col-6 Pu parameter
+% col-7 k parameter
+% col-8 time dependent damage type
+Foundation=load('Foundation.txt');          
+
+NF=size(Foundation,1);
+Foundation=[Foundation  ones(NF,1)];
+
+%FndDmg cell stores data for different damage type:
+%FndDmg{n} stores the damage data for type n
+%col-1 : time
+%col-2 : 1 indicates intact foundation(100%) , 0 indicates demolished foundation (0%) ) 
+
+FndDmg{1}=load('Damage.txt'); 
+              
+FndTMDStiffVar=load('NoVary.txt'); 
+
+%---------------------------------------------
+%Hydrodynamic Loading Paremeters
+%ro=water density
+%T=Wave period
+%H=Wave Height
+%D=Diameter of the monopile subjected to hydrodynamic laoding
+%CM= Inertia Coefficient
+%CD= Drag Coefficient
+%ZSeaBed=Mudline level;
+%ZSeaSurf=Sea surface elevation;
+ro=00.0000001;
+T=10;
+H=2;
+D=2;
+CM=1;
+CD=1;
+ZSeaBed=36;
+ZSeaSurf=56;
+
+WaveX=[ro T H D CM CD ZSeaBed ZSeaSurf];
+%---------------------------------------------
+Time=0:0.05:49;
+
+NJ=size(Coor,1);
+NEl=size(Elem,1);
+[DOFTMD,DOFTCLD,totNDOF] = SettingDOF(TMD,TCLD,NJ);
+
+totdof=1:totNDOF;
+kd=[5;4;3;2;1;0]; 
+restdof=Bnd(:,1)*6-kd(Bnd(:,2));
+totdof(restdof)=0;
+totfreedof=totdof(totdof~=0);
+freedof=totfreedof(totfreedof<=6*NJ);
+
+K=zeros(totNDOF);
+M=zeros(totNDOF);
+Ground=zeros(totNDOF,6);
+Identity= [eye(6);eye(6)];
+
+KGlobalEL=cell(NEl,1);
+
+for iE=1:NEl
+    
+    iSec=Elem(iE,3);
+    
+    
+    jS=Elem(iE,1);
+    jE=Elem(iE,2);
+    
+    XS=Coor(jS,1);
+    YS=Coor(jS,2);
+    ZS=Coor(jS,3);
+    
+    XE=Coor(jE,1);
+    YE=Coor(jE,2);
+    ZE=Coor(jE,3);
+    
+    dX=XE-XS;
+    dY=YE-YS;
+    dZ=ZE-ZS;
+    
+    LeXY=sqrt(dX^2+dY^2);
+    Le=sqrt(dX^2+dY^2+dZ^2);
+    
+    if (LeXY>1e-8)
+    DC=[dY/LeXY   dX*dZ/(LeXY*Le) dX/Le
+        -dX/LeXY  dZ*dY/(LeXY*Le) dY/Le
+        0         -LeXY/Le        dZ/Le];
+    
+    else
+        
+    if (ZS<ZE)
+    DC=eye(3);   
+    else
+    DC=[1  0   0
+        0 -1   0
+        0  0  -1];
+    end
+    end
+    
+    Ri=Sec(iSec,1);
+    Ro=Sec(iSec,2);
+    E=Sec(iSec,3);
+    nu=Sec(iSec,4);
+    rho=Sec(iSec,5);
+    
+    Az=pi*(Ro^2-Ri^2);
+    Jx=pi/4*(Ro^4-Ri^4);
+    Jy=pi/4*(Ro^4-Ri^4);
+    Jz=pi/2*(Ro^4-Ri^4);
+    G = E/(2*(1+nu));
+    
+    ratio=Ri/Ro;
+    
+    kax=6 *(1+nu)^2 * (1+ ratio^2 )^2 / ...
+        ((1+ratio^2)^2 * (7+14*nu+8*nu^2)+ 4 * ratio^2 *(5+10*nu+4*nu^2));
+    
+    kay=kax;
+    
+    Asx=kax*Az;
+    Asy=kay*Az;
+    
+    Ksx=12*E*Jy/(G*Asx*Le^2);
+    Ksy=12*E*Jx/(G*Asy*Le^2);
+    
+    Keloc=zeros(12,12);
+    Meloc=zeros(12,12);
+    
+    Keloc(1,1)= 12*E*Jy/(Le^3*(1+Ksy));
+    Keloc(1,5)=  6*E*Jy/(Le^2*(1+Ksy));
+    Keloc(1,7)= -12*E*Jy/(Le^3*(1+Ksy));
+    Keloc(1,11)= 6*E*Jy/(Le^2*(1+Ksy));
+    
+    Keloc(2,2)= 12*E*Jx/(Le^3*(1+Ksx));
+    Keloc(2,4)= -6*E*Jx/(Le^2*(1+Ksx));
+    Keloc(2,8)= -12*E*Jx/(Le^3*(1+Ksx));
+    Keloc(2,10)= -6*E*Jx/(Le^2*(1+Ksx));
+    
+    Keloc(3,3)= E*Az/Le;
+    Keloc(3,9)=-E*Az/Le;
+    
+    Keloc(4,4)= (4+Ksx)*E*Jx/(Le*(1+Ksx));
+    Keloc(4,8)= 6*E*Jx/(Le^2*(1+Ksx));
+    Keloc(4,10)= (2-Ksx)*E*Jx/(Le*(1+Ksx));
+    
+    Keloc(5,5)= (4+Ksy)*E*Jy/(Le*(1+Ksy));
+    Keloc(5,7)= -6*E*Jy/(Le^2*(1+Ksy));
+    Keloc(5,11)= (2-Ksy)*E*Jy/(Le*(1+Ksy));
+    
+    Keloc(6,6)=  G*Jz/Le;
+    Keloc(6,12)= -G*Jz/Le;
+    
+    Keloc(7,7)=  12*E*Jy/(Le^3*(1+Ksy));
+    Keloc(7,11)=  -6*E*Jy/(Le^2*(1+Ksy));
+    
+    Keloc(8,8)=  12*E*Jx/(Le^3*(1+Ksx));
+    Keloc(8,10)= 6*E*Jx/(Le^2*(1+Ksx));
+    
+    Keloc(9,9)= E*Az/Le;
+    
+    Keloc(10,10)= (4+Ksx)*E*Jx/(Le*(1+Ksx));
+    
+    Keloc(11,11)= (4+Ksy)*E*Jy/(Le*(1+Ksy));
+    
+    Keloc(12,12)= G*Jz/Le;
+          
+    Meloc(1,1)=13*Az*Le/35+6*Jy/(5*Le);
+    Meloc(1,5)=11*Az*Le^2/210+Jy/10;
+    Meloc(1,7)=9*Az*Le/70-6*Jy/(5*Le);
+    Meloc(1,11)=-13*Az*Le^2/420+Jy/10;
+    
+    Meloc(2,2)=13*Az*Le/35+6*Jx/(5*Le);
+    Meloc(2,4)=-11*Az*Le^2/210-Jx/10;
+    Meloc(2,8)=9*Az*Le/70-6*Jx/(5*Le);
+    Meloc(2,10)=13*Az*Le^2/420-Jx/10;
+    
+    Meloc(3,3)=Az*Le/3;
+    Meloc(3,9)=Az*Le/6;
+    
+    Meloc(4,4)=Az*Le^3/105+2*Le*Jx/15;
+    Meloc(4,8)=-13*Az*Le^2/420+Jx/10;
+    Meloc(4,10)=-Az*Le^3/140-Le*Jx/30;
+    
+    Meloc(5,5)=Az*Le^3/105+2*Le*Jy/15;
+    Meloc(5,7)=13*Az*Le^2/420-Jy/10;
+    Meloc(5,11)=-Az*Le^3/140-Le*Jy/30;
+    
+    Meloc(6,6)=Jz*Le/3;
+    Meloc(6,12)=Jz*Le/6;
+    
+    Meloc(7,7)=13*Az*Le/35+6*Jy/(5*Le);
+    Meloc(7,11)=-11*Az*Le^2/210-Jy/10; 
+    
+    Meloc(8,8)=13*Az*Le/35+6*Jx/(5*Le);
+    Meloc(8,10)=11*Az*Le^2/210+Jx/10;
+    
+    Meloc(9,9)=Az*Le/3;
+    
+    Meloc(10,10)=Az*Le^3/105+2*Le*Jx/15;
+    
+    Meloc(11,11)=Az*Le^3/105+2*Le*Jy/15;
+    
+    Meloc(12,12)=Jz*Le/3;
+    
+    Keloc=Keloc+Keloc'-diag(diag(Keloc));
+    Meloc=rho*(Meloc+Meloc'-diag(diag(Meloc)));
+    
+    dofjS=6*jS-[5 4 3 2 1 0];
+    dofjE=6*jE-[5 4 3 2 1 0];
+    dofe=[dofjS dofjE];
+    
+    D0=zeros(3);
+    T=[DC D0 D0 D0
+       D0 DC D0 D0
+       D0 D0 DC D0
+       D0 D0 D0 DC];
+    
+    Keglob=T*Keloc*T';
+    Meglob=T*Meloc*T';
+    
+    KGlobalEL{iE}=Keglob;
+   
+    K(dofe,dofe)=K(dofe,dofe)+Keglob;
+    M(dofe,dofe)=M(dofe,dofe)+Meglob;
+    
+    Ground(dofe,1:6)= Ground(dofe,1:6)+Meglob* Identity;
+end
+
+KRED=K(freedof,freedof);
+MRED=M(freedof,freedof);
+%RNA Mass
+M(667,667)=M(667,667)+1085000;
+M(668,668)=M(668,668)+.1085000;
+M(669,669)=M(669,669)+.1085000;
+M(670,670)=M(670,670)+4e8;
+M(671,671)=M(671,671)+3.2e8;
+M(672,672)=M(672,672)+2.5e8;
+
+KRED=K(freedof,freedof);
+MRED=M(freedof,freedof);
+
+[Ms,W2]=eig(KRED,MRED);
+W=sqrt(W2)/(2*pi);
+
+%--------------- Rayleigh damping settings--------------------
+freq1=Dmp(1,1);
+freq2=Dmp(2,1);
+
+%w1=sqrt(W2(freq1,freq1));
+%w2=sqrt(W2(freq2,freq2));
+
+w1=0.235;
+w2=1.7;
+
+damping1=Dmp(1,2);
+damping2=Dmp(2,2);
+Ans =[1/(2*w1)   w1/2 ; 1/(2*w2)   w2/2]^-1*[damping1 ; damping2];
+
+alphaR=Ans(1)*1;
+betaR=Ans(2)*1;
+
+C=alphaR * M + betaR * K;
+%----------------------------------------------------------------
+NTMD=size(TMD,1);
+
+for i=1:NTMD
+
+ m2=TMD(i,3);
+kj=TMD(i,4);
+cj=TMD(i,5);
+ dtmd=DOFTMD(TMD(i,1),TMD(i,2));
+
+    if (TMD(i,2)==1)
+   
+    d=6*TMD(i,1)-5;
+    d2=6*TMD(i,1)-4; 
+    d3=6*TMD(i,1)-3; 
+    end
+    
+     if (TMD(i,2)==2)
+    d=6*TMD(i,1)-4;  
+    d2=6*TMD(i,1)-5; 
+    d3=6*TMD(i,1)-3;  
+     end
+
+dof=[d , dtmd];
+
+KEL=[kj -kj
+     -kj kj];
+MEL=[0   0
+         0   m2];
+CEL=[cj -cj
+     -cj cj];
+K(dof,dof)=K(dof,dof)+KEL;
+M(dof,dof)=M(dof,dof)+MEL;
+M(d2,d2)=M(d2,d2)+m2;
+M(d3,d3)=M(d3,d3)+m2;
+C(dof,dof)=C(dof,dof)+CEL;
+  
+end
+
+ NTMD=size(TMD,1);
+ if (NTMD>0)
+ dofTMDAttach=6*TMD(:,1)-6+TMD(:,2);
+ dofTMD=DOFTMD(TMD(:,1),TMD(:,2));
+ FTMD=zeros(NTMD,1);
+PenaltyValue=1e16;
+ end
+ %-----------------------------------------------------------------
+NTCLD=size(TCLD,1);
+
+% col-1 dof that TCLD attached
+% col-2 TCLD density
+% col-3 A 
+% col-4 B
+% col-5 L
+% col-6 xi
+
+for i=1:NTCLD
+   
+  dtcld=DOFTCLD(TCLD(i,1),TCLD(i,2));
+  density=TCLD(i,3);
+  A=TCLD(i,4);
+  B=TCLD(i,5);
+  L=TCLD(i,6);
+    
+     if (TCLD(i,2)==1)
+    d=6*TCLD(i,1)-5;
+    d2=6*TCLD(i,1)-4; 
+    end
+    
+     if (TCLD(i,2)==2)
+    d=6*TCLD(i,1)-4;  
+    d2=6*TCLD(i,1)-5; 
+     end
+    
+M(d,d)=M(d,d)+density*A*L;
+M(d2,d2)=M(d2,d2)+density*A*L;
+M(d,dtcld)=density*A*B;
+M(dtcld,d)=density*A*B;
+M(dtcld,dtcld)=density*A*L;
+K(dtcld,dtcld)=2*density*A*gravity;
+end
+
+  NTCLD=size(TCLD,1);
+  if ( NTCLD>0)
+  dofTCLDAttach=6*TCLD(:,1)-6+TCLD(:,2);
+ dofTCLD=DOFTCLD(TCLD(:,1),TCLD(:,2));
+end
+  %--------------------------------------------------------------------
+  GPoint=[-0.861136311594053  0.347854845137454
+               -0.339981043584856  0.652145154862546
+                0.339981043584856  0.652145154862546
+              +0.861136311594053  0.347854845137454];           
+    NG=size(GPoint,1);        
+
+NFoundation=size(Foundation,1);       
+
+NLoad=size(Load,1);
+  
+NTime=length(Time);
+
+totNDOF=size(K,1);
+
+U=zeros(totNDOF,NTime);
+Ut=zeros(totNDOF,NTime);
+Utt=zeros(totNDOF,NTime);
+RF=zeros(totNDOF,NTime);
+P=zeros(totNDOF,1);
+
+for iL=1:NLoad
+d=6*Load{iL,1}(1,1)-6+Load{iL,1}(1,2) ; 
+P(d)=Load{iL,2}(1,2);    
+end
+  
+P1=P(:,1)-C*Ut(:,1)-K*U(:,1);
+Utt(:,1)=M\P1;
+
+dt0 = Time(2)- Time(1);
+
+gama=1/2;
+beta=1/4;
+
+a1=1/(beta * dt0^2) * M + gama / (beta * dt0) * C;
+a2=1/(beta * dt0) * M + (gama/beta - 1) * C;
+a3=(1/(2 * beta) - 1) * M + dt0 * (gama/ (2 * beta) -1) * C;
+K0=K+a1;
+Kbar=zeros(totNDOF,totNDOF);
+
+NMaxIteration=400;
+
+RNAS=zeros((NTime-1),1);
+
+error1=1;
+for iTime=1:(NTime-1)
+
+dt=Time(iTime+1)-Time(iTime); 
+%if (abs(dt0-dt)>1e-8)
+a1=1/(beta * dt^2) * M + gama / (beta * dt) * C;
+a2=1/(beta * dt) * M + (gama/beta - 1) * C;
+a3=(1/(2 * beta) - 1) * M + dt * (gama/ (2 * beta) -1) * C;
+dt0=dt;
+K0=K+a1;
+
+Kbar=K0;
+
+for iIteration=1:NMaxIteration
+
+if (NTCLD>0)
+    dU=U(dofTCLD,iTime+1)-U(dofTCLD,iTime);
+end
+
+if ( NTCLD>0)
+Ut(dofTCLD,iTime+1)=gama/(beta*dt)*dU+(1-gama/beta)*Ut(dofTCLD,iTime)+dt*(1-gama/(2*beta))*Utt(dofTCLD,iTime);
+end
+
+if (iIteration==1)
+RES0=a1*U(:,iTime)+a2*Ut(:,iTime)+a3*Utt(:,iTime);    
+end
+
+for iL=1:NLoad
+d=6*Load{iL,1}(1,1)-6+Load{iL,1}(1,2) ; 
+f1=interp1(Load{iL,2}(:,1),Load{iL,2}(:,2),Time(iTime+1),'linear',Load{iL,2}(end,2));
+P(d,1)=f1;
+end
+
+F=zeros(totNDOF,1);
+ GroundForce=zeros(totNDOF,1);
+
+for iF=1:NFoundation
+dof1=6*Foundation(iF,1)-5;    
+dof2=6*Foundation(iF,2)-5;
+dof3=6*Foundation(iF,1)-4;    
+dof4=6*Foundation(iF,2)-4;
+H1=Foundation(iF,3);
+H2=Foundation(iF,4);
+AA = Foundation (iF,5);   
+PPu =Foundation(iF,6);
+kk = Foundation (iF,7);
+ dmgtyp=Foundation (iF,8);
+u1=U(dof1,iTime+1);
+u2=U(dof2,iTime+1);
+u3=U(dof3,iTime+1);
+u4=U(dof4,iTime+1);
+
+detJ=abs(H2-H1)/2;
+
+for j=1:size(FndDmg{dmgtyp},1)
+ dmg=interp1(FndDmg{dmgtyp}(:,1),FndDmg{dmgtyp}(:,2),Time(iTime+1),'linear',FndDmg{dmgtyp}(end,2)); 
+end
+
+asas(iTime,1)=dmg;
+
+for iG=1:NG
+xi=GPoint(iG,1);
+weigth=GPoint(iG,2);
+N1=(1-xi)/2;
+N2=(1+xi)/2;
+HH=N1*H1+N2*H2;
+uu=N1*u1+N2*u2;
+par=kk*HH/(AA*PPu);
+
+p=kk*dmg*uu;  
+F(dof1)=F(dof1)+N1*p*detJ*weigth;
+F(dof2)=F(dof2)+N2*p*detJ*weigth;
+derivative=AA * PPu * par * (sech(par * uu))^2;
+Kbar(dof1,dof1)=Kbar(dof1,dof1)+ kk*  N1 * N1 *  detJ * weigth;
+Kbar(dof1,dof2)=Kbar(dof1,dof2)+ kk*  N1 * N2 *  detJ * weigth;
+Kbar(dof2,dof1)=Kbar(dof2,dof1)+ kk*  N2 * N1 *  detJ * weigth;
+Kbar(dof2,dof2)=Kbar(dof2,dof2)+ kk*  N2 * N2 *  detJ * weigth;
+
+uu=N1*u3+N2*u4;
+par=kk*HH/(AA*PPu);
+p=kk*dmg*uu; 
+F(dof3)=F(dof3)+N1*p*detJ*weigth;
+F(dof4)=F(dof4)+N2*p*detJ*weigth;
+Kbar(dof3,dof3)=Kbar(dof3,dof3)+ kk*  N1 * N1 *  detJ * weigth;
+Kbar(dof3,dof4)=Kbar(dof3,dof4)+ kk*  N1 * N2 *  detJ * weigth;
+Kbar(dof4,dof3)=Kbar(dof4,dof3)+ kk*  N2 * N1 *  detJ * weigth;
+Kbar(dof4,dof4)=Kbar(dof4,dof4)+ kk*  N2 * N2 *  detJ * weigth;
+
+%p=dmg*AA*PPu*tanh(par*uu); 
+%F(dof1)=F(dof1)+N1*p*detJ*weigth;
+%F(dof2)=F(dof2)+N2*p*detJ*weigth;
+%derivative=AA * PPu * par * (sech(par * uu))^2;
+%Kbar(dof1,dof1)=Kbar(dof1,dof1)+ derivative *  N1 * N1 *  detJ * weigth;
+%Kbar(dof1,dof2)=Kbar(dof1,dof2)+ derivative *  N1 * N2 *  detJ * weigth;
+%Kbar(dof2,dof1)=Kbar(dof2,dof1)+ derivative *  N1 * N2 *  detJ * weigth;
+%Kbar(dof2,dof2)=Kbar(dof2,dof2)+ derivative *  N2 * N2 *  detJ * weigth;
+
+%F(dof3)=F(dof3)+N1*p*detJ*weigth;
+%F(dof4)=F(dof4)+N2*p*detJ*weigth;
+%Kbar(dof3,dof3)=Kbar(dof3,dof3)+ derivative *  N1 * N1 *  detJ * weigth;
+%Kbar(dof3,dof4)=Kbar(dof3,dof4)+ derivative *  N1 * N2 *  detJ * weigth;
+%Kbar(dof4,dof3)=Kbar(dof4,dof3)+ derivative *  N1 * N2 *  detJ * weigth;
+%Kbar(dof4,dof4)=Kbar(dof4,dof4)+ derivative *  N2 * N2 *  detJ * weigth;
+
+end
+end
+
+for j=1:NTMD
+ d0=6*TMD(j,1)-6+TMD(j,2);    
+ dtmd=DOFTMD(TMD(j,1),TMD(j,2));
+dof3=[d0, dtmd];    
+UTMD=U(dof3,iTime+1);
+maxgap=TMD(j,6);
+gap=UTMD(1)-UTMD(2);
+
+penalty=0;
+QContact=0;
+if (gap>=maxgap)
+QContact=maxgap;    
+penalty=PenaltyValue;
+end
+
+if (gap<=-maxgap)
+QContact=-maxgap;    
+penalty=PenaltyValue;
+end
+
+CContact=penalty* [1 -1
+                            -1  1];
+Ft=CContact*UTMD;
+
+if ((Ft(1)*FTMD(j))>=0)&&(penalty>0)
+FTMD(j)=Ft(1);
+Kbar(dof3,dof3)= Kbar(dof3,dof3)+CContact;
+F(dof3)=F(dof3)+Ft-[1;-1]*penalty*QContact;
+else
+FTMD(j)=0;  
+end               
+end
+
+for j=1:NTCLD
+dofu=DOFTCLD(TCLD(j,1),TCLD(j,2));
+density=TCLD(j,3);
+A=TCLD(j,4);
+B=TCLD(j,5);
+L=TCLD(j,6);
+xi=TCLD(j,7);
+ut=Ut(dofu,iTime+1);
+F(dofu)=F(dofu)+1/2*density*A*xi*abs(ut)*ut;
+
+derivative=0;
+if ut>0
+derivative=1/2*density*A*xi*(2*gama/(beta*dt))*ut;
+end
+if ut<0
+derivative=0;%-1/2*density*A*xi*(2*gama/(beta*dt))*ut;
+end
+
+Kbar(dofu,dofu)= Kbar(dofu,dofu)+derivative;
+end
+
+for j=1:size(groundAccel,1)
+ fg=interp1(groundAccel{j,2}(:,1),groundAccel{j,2}(:,2),Time(iTime+1),'linear',groundAccel{j,2}(end,2));    
+ GroundForce=GroundForce+fg*Ground(:,groundAccel{j,1});   
+end
+
+for iE=1:NEl
+    
+    jS=Elem(iE,1);
+    jE=Elem(iE,2);
+    
+    XS=Coor(jS,1);
+    YS=Coor(jS,2);
+    ZS=Coor(jS,3);
+    
+    XE=Coor(jE,1);
+    YE=Coor(jE,2);
+    ZE=Coor(jE,3);
+    
+    ro=WaveX(1);
+    T=WaveX(2);
+    H=WaveX(3);
+    D=WaveX(4);
+    CM=WaveX(5);
+    CD=WaveX(6);
+    ZSeaBed=WaveX(7);
+    ZSeaSurf=WaveX(8);
+    
+ if   (((ZSeaBed<=ZE)&&(ZE<=ZSeaSurf)) && ((ZSeaBed<=ZS)&&(ZS<=ZSeaSurf)))
+    
+    dX=XE-XS;
+    dY=YE-YS;
+    dZ=ZE-ZS;
+   
+    Le=sqrt(dX^2+dY^2+dZ^2);
+    detJ=Le/2;
+    
+dof1=6*jS-5;    
+dof2=6*jE-5;
+
+u1=U(dof1,iTime+1);
+u2=U(dof2,iTime+1);
+
+wL=gravity*T^2/(2*pi);
+wK=2*pi/wL;
+wS=2*pi/T;
+
+for iG=1:NG
+xi=GPoint(iG,1);
+weigth=GPoint(iG,2);
+N1=(1-xi)/2;
+N2=(1+xi)/2;
+uu=N1*u1+N2*u2;
+Z=N1*ZS+N2*ZE;
+
+wu=(pi*H/T)*exp(wK*Z)*cos(wK*uu-wS*Time(iTime+1));
+wut=(2*pi^2*H/T^2)*exp(wK*Z)*sin(wK*uu-wS*Time(iTime+1));
+dFw=1/2*ro*CD*wu*abs(wu)*D+CM*ro*pi*D^2/4*wut;
+
+F(dof1)=F(dof1)+N1*dFw*detJ*weigth;
+F(dof2)=F(dof2)+N2*dFw*detJ*weigth;
+
+end
+
+ end
+
+end
+
+RES1=K0*U(:,iTime+1)-RES0-P + F+GroundForce;
+RF(:,iTime+1)=RES1;
+du=zeros(totNDOF,1);
+du(totfreedof)=Kbar(totfreedof,totfreedof)\-RES1(totfreedof);
+
+U(:,iTime+1)=U(:,iTime+1)+du;
+error=norm(du);
+
+relativeError=error/ error1;
+    fprintf('%s %5.4e %s%2i  %s %6.3e\n','Time:',Time(iTime+1),' Iteration: ',iIteration,'Rel.Error: ',relativeError);
+
+if relativeError<1e-3
+break;    
+end
+
+if (iIteration==1)
+    error1=error;
+end
+
+end
+if (iIteration==NMaxIteration)
+warning( ' Not converged ' );
+end
+dU=U(:,iTime+1)-U(:,iTime);
+Ut(:,iTime+1)=gama/(beta*dt)*dU+(1-gama/beta)*Ut(:,iTime)+dt*(1-gama/(2*beta))*Utt(:,iTime);
+Utt(:,iTime+1)=1/(beta*dt^2)*dU-1/(beta*dt)*Ut(:,iTime)-(1/(2*beta)-1)*Utt(:,iTime);
+
+end
+
+AAAA=U(667,:)';
+ 
+  iE=37;
+  jS=Elem(iE,1);
+  jE=Elem(iE,2);
+ dofjS=6*jS-[5 4 3 2 1 0];
+ dofjE=6*jE-[5 4 3 2 1 0];
+ dofe=[dofjS dofjE];
+  FGlobalElem=KGlobalEL{iE}*U(dofe,:);
+  %plot(Time, FGlobalElem(1,:))
+  BASEX=FGlobalElem(7,:)';
+  BASEY=FGlobalElem(8,:)';
+  BASEMX=FGlobalElem(11,:)';
+  BASEMY=FGlobalElem(10,:)';
+  
+  plot(Time, FGlobalElem(1,:));
+  plot(Time, FGlobalElem(5,:));
+  plot(Time, AAAA);
